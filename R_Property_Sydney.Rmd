@@ -1,0 +1,371 @@
+---
+title: "R_Sydney_Property_Analysis"
+author: "Harry"
+date: "20/03/2021"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+## Introduction
+
+The purpose of this document is to investigate whether commonly listed property features influence the price of Sydney properties based on sold property information obtained from the following website: <https://www.aupropertyreport.com/auction-results/NSW/2021-03-14/>. We explore the process of collecting, cleaning, manipulating and visualising data using R and briefly Python.
+
+## Setting up the R environment
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Initialise, include=FALSE}
+# Setting up packages, file directories and parameters
+
+# Libraries
+require(tidyverse)
+require(lubridate)
+require(rvest)
+require(reticulate)
+require(tidymodels)
+require(esquisse)
+require(sf)
+
+# Turn off scientific notation
+options(scipen=999)
+
+# Directories
+dir_proj <- "C:/Users/harry/OneDrive/Documents/R_Shiny_Visual"
+
+# Parameters
+Start_date <- "2021-02-15"
+End_date <- "2021-03-14"
+Year <- Start_date %>% ymd %>% year
+
+```
+
+## Data Collection / webscraping
+
+The following fields are collected: 1. Price 2. Agent Company 3. Address 4. Number of bedrooms 5. Property type - House or unit or other? 6. Auction Result - sold before auction or sold at auction 7. Link to further information on property 8. Postcode
+
+![](Web_Scrape_Home.png)
+
+```{r Web Scrapping, eval=FALSE}
+
+# Get URL
+
+URL <- seq(Start_date %>% ymd, End_date %>% ymd, 91) %>% as.character() %>% 
+  purrr::map(function(n)paste0("https://www.aupropertyreport.com/auction-results/NSW/", n,"/") %>% read_html())
+
+# Page <- read_html("https://www.aupropertyreport.com/auction-results/NSW/2021-03-14/")
+Page <- URL
+
+Get_Prop_info <- function(Page){tibble(
+  Price = Page %>% 
+    html_nodes("td:nth-child(2)") %>% 
+    html_text(),
+
+  Agent = Page %>% 
+    html_nodes("td:nth-child(6)") %>% 
+    html_text(),
+
+  Address = Page %>% 
+    html_nodes("td:nth-child(1)") %>% 
+    html_text(),
+
+  Beds = Page %>% 
+    html_nodes("td:nth-child(5)") %>% 
+    html_text(),
+
+  Type = Page %>% 
+    html_nodes("td:nth-child(4)") %>% 
+    html_text(),
+
+  Result = Page %>% 
+    html_nodes("td:nth-child(3)") %>% 
+    html_text(),
+  
+  Link_info = Page %>% 
+    html_nodes("td a") %>% 
+    html_attr("href")
+)}
+
+Property_data <- URL %>% 
+  purrr::map(function(n)Get_Prop_info(n)) %>% 
+  bind_rows()
+
+Get_PostCode <- function(Page){tibble(
+  Address = Page %>% 
+  html_nodes("tr > :nth-child(1)") %>% 
+  html_text()
+) %>% 
+  mutate(
+    PostCode = Address %>% substr(nchar(Address)-4,nchar(Address)) %>% as.numeric()
+  )}
+
+Full_Address <- URL %>% 
+  purrr::map(function(n)Get_PostCode(n)) %>% 
+  bind_rows() 
+
+PostCode <- Full_Address %>% 
+  pull(PostCode)
+
+```
+
+# Python and R integration
+
+Post code information is used by the website to group properties together. Only the first property per postcode were web scraped into the tabular data above. To ensure postcodes are available for all properties, we use python to loop through the data such that missing postcodes are assigned the correct previous record's postcode.
+
+```{python PostCode Calculation, eval=FALSE}
+
+PostCode = r.PostCode
+x = []
+for n in PostCode:
+  if n > 1:
+    y = n
+    x.append(y)
+  else:
+    x.append(y)
+
+
+```
+
+# Collecting additional data
+
+Within each link, we can click on the property sold to discover more information. This new page contains commonly listed property features that can be scraped: 9. Number of bathrooms 10. Number of car spots in the garage 11. Size of land in square metres 12. Distance to the CBD in kms 13. Date of property sold 14. Nearest train station name 15.Distance to the nearest train station in kms.
+
+![](Web_Scrape_Nested.PNG)
+
+Note that for some of the above fields, some properties may not disclose information, resulting in missing values.
+
+```{r Additional Information, eval=FALSE}
+# Get post codes from Python variable
+Full_Address1 <- Full_Address %>% 
+  bind_cols(Post_Code = py$x) %>% 
+  select(-PostCode)
+  
+# Add post codes to property data
+Property_data1 <- Property_data %>% 
+  left_join(Full_Address1, by = c("Address")) %>% 
+  mutate(Index = 1:dim(Property_data[1]))
+
+# Obtaining additional information function
+Add_info <- function(link){
+  Info = link %>%
+    read_html()
+    
+  House_rooms = Info %>% 
+   html_nodes(".overflow-hidden .col-md-4 li") %>% 
+   html_text()
+  
+  Land_size = Info %>% 
+    html_nodes(".col-md-8 .list-unstyled li:nth-child(2)") %>% 
+    html_text()
+    
+  Dist_CBD = Info %>% 
+    html_nodes(".list-unstyled code") %>% 
+    html_text()
+    
+  Date_sold = Info %>% 
+    html_nodes(".overflow-hidden h5") %>% 
+    html_text()
+    
+ Nearest_train_name = Info %>% 
+    html_nodes(".margin-bottom-30 .list-unstyled .margin-bottom-10:nth-child(1)") %>% 
+    html_text()
+    
+ Nearest_train_dist = Info %>% 
+    html_nodes(".margin-bottom-10:nth-child(1) .rounded-2x") %>% 
+    html_text()
+ 
+ Additional = list(House_rooms,Land_size,Dist_CBD,Date_sold,Nearest_train_name,Nearest_train_dist)
+ 
+ return(Additional)
+ 
+}
+
+# Loop into each property and scrape additional information
+Additional_info <- list()
+for (info in Property_data1$Link_info){
+  Additional = Add_info(info) %>% 
+    list()
+  Additional_info = Additional_info %>% 
+    append(Additional)
+  Sys.sleep(1)
+}
+
+# For each additional information obtained, manipulate it into tabular format
+Additional_info2 <- 1:length(Additional_info) %>% 
+  purrr::map(function(n)tibble(
+    House_rooms = Additional_info[[n]][[1]] %>% as.character(),
+    
+    Land_size = Additional_info[[n]][[2]] %>% as.character(),
+    
+    Dist_CBD = Additional_info[[n]][[3]] %>% as.character(),
+    
+    Date_sold = Additional_info[[n]][[4]] %>% as.character(),
+    
+    Nearest_train_name = Additional_info[[n]][[5]] %>% as.character(),
+    
+    Nearest_train_dist = Additional_info[[n]][[6]] %>% as.character(),
+    
+    Index = n
+  )) %>% 
+  bind_rows()
+
+```
+
+## Data Cleaning process
+
+Cleaning the data to specify the correct formats. This means: 1. Missing numbers will be left as is 2. Data types for each field are assigned 3. For numbers, this means removing commas and dollar signs and transforming it from text to number data type 4. Other cases involves removing units (kms) and words.
+
+```{r Data Cleanup, eval=FALSE}
+
+glimpse(Property_data1)
+
+# Joining main data set with additional information data set
+Property_data2 <- Property_data1 %>% 
+  mutate(Index = 1:dim(Property_data1)[1]) %>% 
+  left_join(Additional_info2, by = c("Index"))
+
+glimpse(Property_data2)
+
+# Cleaning data
+Property_data3 <- Property_data2 %>%
+  mutate(Price = Price %>% str_remove_all("[$,]") %>% as.numeric(),
+         Agent = Agent %>% as.factor(),
+         Beds = Beds %>% as.factor(),
+         Type = Type %>% as.factor(),
+         Result = Result %>% as.factor(),
+         Post_Code = Post_Code %>% as.factor()
+         ) %>% 
+  separate(House_rooms,c("Empty","Type2","Beds2","Bathrooms2","Cars2"), fill = "right") %>% 
+  mutate(Date_sold = Date_sold %>% substr(nchar(Date_sold)-10,nchar(Date_sold)) %>% dmy,
+         Nearest_train_name = Nearest_train_name %>% substr(nchar(Nearest_train_dist)+3,nchar(Nearest_train_name))) %>% 
+  mutate(Dist_CBD = Dist_CBD %>% substr(1,nchar(Dist_CBD)-3) %>% as.numeric(),
+         Nearest_train_dist = Nearest_train_dist %>% substr(1,nchar(Nearest_train_dist)-3) %>% as.numeric())
+
+# Viewing data
+glimpse(Property_data3)
+summary(Property_data3 %>% filter(Price %>% is.na == FALSE))
+mean_price = mean(Property_data3$Price,na.rm = TRUE)
+
+# saving the data
+setwd(dir_proj)
+write_rds(Property_data3,file = "Property_data.rds")
+
+```
+
+## Exploratory data analysis
+
+Create graphs to visually inspect whether there is a relationship between commonly list features for property advertisements vs the price sold. 1. Histogram of property prices 2. Property prices vs date sold 3. Property prices vs Number of beds violin plot 4. Property price heatmap
+
+```{r EDA, echo=TRUE}
+# Optional: reading in data
+setwd(dir_proj)
+Property_data3 <- read_rds("Property_data.rds")
+
+# View of data
+head(Property_data3)
+
+# Histogram of property prices
+Property_data3 %>% 
+  ggplot(aes(Price/1000000)) +
+  geom_histogram() +
+  ggtitle(paste0("Distribution of property prices from ",Start_date," to ",End_date)) +
+  xlab("Property Price ($m)") + ylab("Count")
+
+# Property price over time
+Property_data3 %>% 
+  filter(Date_sold %>% year() >= Year) %>% 
+  ggplot(aes(Date_sold,Price/1000000)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  ggtitle(paste0("Property Price from ",Start_date," to ",End_date)) +
+  xlab("Date Sold") + ylab("Property Price ($m)")
+
+lm(Price ~ Date_sold,data = Property_data3) %>% 
+  summary()
+
+Property_data3 %>%
+  filter(Date_sold %>% year() >= Year) %>% 
+  group_by(Month_sold = paste0(year(Date_sold)," ",case_when(month(Date_sold) == 1 ~ "Jan",
+                                                             month(Date_sold) == 2 ~ "Feb",
+                                                             month(Date_sold) == 3 ~ "Mar",
+                                                             month(Date_sold) == 4 ~ "Apr",
+                                                             month(Date_sold) == 5 ~ "May",
+                                                             month(Date_sold) == 6 ~ "Jun",
+                                                             month(Date_sold) == 7 ~ "Jul",
+                                                             month(Date_sold) == 8 ~ "Aug",
+                                                             month(Date_sold) == 9 ~ "Sep",
+                                                             month(Date_sold) == 10 ~ "Oct",
+                                                             month(Date_sold) == 11 ~ "Nov",
+                                                             month(Date_sold) == 12 ~ "Dec"))) %>% 
+  summarise(Count = n())
+
+# Property price vs number of bedrooms
+Property_data3 %>% 
+  ggplot(aes(x=Beds,y=Price/1000000)) +
+  geom_violin() +
+  ggtitle("Property Price vs Bedrooms") +
+  xlab("Number of bedrooms") + ylab("Property Price ($m)")
+
+lm(Price ~ Beds,data = Property_data3) %>% 
+  summary()
+
+Property_data3 %>%
+  filter(Date_sold %>% year() >= Year) %>% 
+  group_by(Number_of_bedrooms = Beds) %>% 
+  summarise(Count = n())
+
+# Relationship between property price vs distance from the CBD
+Property_data3 %>% 
+  ggplot(aes(x=Dist_CBD,y=Price/1000000)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  ggtitle("Property Price vs Distance from Sydney CBD") +
+  xlab("Distance from Sydney CBD (km)") + ylab("Property Price ($m)")
+
+lm(Price ~ Dist_CBD,data = Property_data3) %>% 
+  summary()
+
+# Add NSW map
+setwd(dir_proj)
+#NSW_map <- read_sf("MB_2016_NSW.shp")
+AUST_map <- read_sf("SA3_2016_AUST.shp")
+PostCode_Mapping <- read_csv("australian_postcodes.csv")
+
+# Reduce AUST map to NSW
+NSW <- AUST_map %>% 
+  filter(STE_NAME16 == "New South Wales") %>% 
+  filter(GCC_NAME16 %in% c("Greater Sydney","No usual address (NSW)"))
+
+# Map Post codes to SA3 codes
+Property_map <- Property_data3 %>% 
+  left_join(PostCode_Mapping, by = c("Post_Code" = "postcode")) %>% 
+  select(names(Property_data3),SA3_CODE_2016) %>% 
+  mutate(SA3_CODE_2016 = SA3_CODE_2016 %>% as.character()) %>% 
+  left_join(NSW, by = c("SA3_CODE_2016" = "SA3_CODE16")) %>% 
+  mutate(SA3_CODE16 = SA3_CODE_2016) %>% 
+  select(names(NSW),Price) %>% 
+  filter(GCC_NAME16 %in% c("Greater Sydney","No usual address (NSW)")) %>% 
+  select(SA3_CODE16,Price)
+
+# Filtered map with price
+NSW_Property <- NSW %>% 
+  filter(SA3_CODE16 %in% Property_map$SA3_CODE16) %>% 
+  inner_join(Property_map, by = c("SA3_CODE16")) %>% 
+  select(names(NSW),Price) 
+
+# Heat map of Sydney
+ggplot() +
+  geom_sf(data = NSW) +
+  geom_sf(data = NSW_Property, aes(fill = Price/1000000)) +
+  scale_fill_gradient(low = "#56B1F7",high = "#132B43", na = "Property Price ($m)") +
+  ggtitle("Sydney Property Price Heatmap") +
+  xlab("Latitude") + ylab("Longtitude")
+
+```
+
+## Conclusion
+
+Summarising the graphs and statistics produced for Sydney property price vs commonly listed attributes: 1. Sydney property prices are right skewed distributed with a mean of \$1,645,043. 2. Over the investigation period, there does not seem to be a significant increase or decrease in property prices sold based on a p-vale of 0.496 due to the short period of investigation and data collected. 3. Property prices vs number of bedrooms has a positive relationship. Most properties sold within the investigation period have 2 to 5 bedrooms, with the mode at 3 bedrooms with 103 records. 4. There is a negative relationship between property price and distance from the Sydney CBD, which means properties are more expensive when you're located closer to the CBD. This relationship is statistically significant with a p value of 0.0001523 when testing the coefficient for distance to CBD. In our linear model, a 1km increase in distance from CBD results in a \$16917 decrease in property price. 5. Our heat map loosely validated point 4, where for our investigation period, higher property prices are concentrated more towards the CBD.
